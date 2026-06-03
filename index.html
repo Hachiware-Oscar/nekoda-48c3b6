@@ -369,6 +369,10 @@ const COURSES = [
 function allCourses() { return COURSES; }
 function courseById(id) { return COURSES.find(c => c.id === id) || null; }
 
+// 全体スピード調整：コース帯×速度設定の上に掛かるグローバル係数。
+// 流れる速さを全体的にこの倍率にする（小さいほどゆっくり）。子の反応で微調整可。
+const NK_SPEED_SCALE = 2 / 3;
+
 const SPEED_MUL = { slow: 0.8, normal: 1.0, fast: 1.25 };
 function speedMul(id) { return SPEED_MUL[id] || 1.0; }
 const SPEED_OPTS = [
@@ -533,6 +537,9 @@ function loadBgs() {
 /* ===== audio.js ===== */
 const Audio2 = (()=>{
   let ctx=null, master=null, bgmTimer=null, bgmStep=0;
+  let bgmGain=null, bgmSource=null, bgmWantKey=null; // mp3 BGM 用（Web Audio。打鍵音と同じ ctx→master を通すので確実に共存）
+  const bgmBuffers = {};                              // key→デコード済み AudioBuffer のキャッシュ
+  const BGM_GAIN = 0.47;                              // BGM は背景。打鍵音が埋もれないよう控えめに（0.55→0.47, 約15%減）
   function ensure(){
     if(ctx) return;
     const ACtx = window.AudioContext||window.webkitAudioContext; if(!ACtx) return;
@@ -551,7 +558,10 @@ const Audio2 = (()=>{
       try{ const o=ctx.createOscillator(),g=ctx.createGain(); g.gain.value=0; o.connect(g); g.connect(master); o.start(); o.stop(ctx.currentTime+0.02); }catch(e){}
     }
   }
-  function setVol(){ if(master) master.gain.value = settings.muted?0:settings.vol; }
+  function setVol(){
+    if(master) master.gain.value = settings.muted?0:settings.vol;
+    if(bgmGain) bgmGain.gain.value = (settings.muted?0:settings.vol)*BGM_GAIN; // mp3 BGM も連動
+  }
   function tone(freq,dur,type,gain,when){
     if(!ctx) return; when = when||ctx.currentTime;
     const o=ctx.createOscillator(), g=ctx.createGain();
@@ -588,19 +598,77 @@ const Audio2 = (()=>{
       o.start(t); o.stop(t+0.36);
     }
   };
-  const melody=[72,76,79,76,77,74,72,74];
-  function startBgm(){
-    if(!ctx||bgmTimer||!settings.bgm||settings.muted) return;
+
+  // 背景シーン(game.bgIndex)ごとの mp3 BGM。assets/bgm/ の別ファイルを fetch して Web Audio でループ再生。
+  // file:// では fetch がブロックされるので合成BGM(BGM_SCENES)にフォールバック（本番 https / ローカルHTTPサーバでmp3）。
+  // 順番は build.js の BG_IDS と一致：0:街 1:夕焼け 2:公園 3:縁側 4:祭り
+  const BGM_KEYS = ["town", "yuyake", "park", "engawa", "matsuri"];
+  const BGM_FILES = {
+    town:"assets/bgm/town.mp3", yuyake:"assets/bgm/yuyake.mp3", park:"assets/bgm/park.mp3",
+    engawa:"assets/bgm/engawa.mp3", matsuri:"assets/bgm/matsuri.mp3"
+  };
+  function bgmIndex(){ return (typeof game!=="undefined" ? (game.bgIndex||0) : 0); }
+  function ensureBgmGain(){
+    if(!bgmGain && ctx){ bgmGain=ctx.createGain(); bgmGain.gain.value=(settings.muted?0:settings.vol)*BGM_GAIN; bgmGain.connect(master); }
+    return bgmGain;
+  }
+  function stopBgmSource(){ if(bgmSource){ try{ bgmSource.stop(); }catch(e){} bgmSource=null; } }
+  function playBuffer(key){
+    const buf=bgmBuffers[key]; if(!buf||!ctx) return;
+    stopBgmSource();
+    const src=ctx.createBufferSource(); src.buffer=buf; src.loop=true;
+    src.connect(ensureBgmGain()); src.start(0); bgmSource=src;
+  }
+
+  // 合成BGM（mp3が無いシーンのフォールバック）。同じ並び。
+  const BGM_SCENES = [
+    { tempo:340, wave:"sine",     bassWave:"triangle", notes:[72,76,79,76,81,79,76,72] }, // 街：明るいポップ
+    { tempo:430, wave:"sine",     bassWave:"triangle", notes:[69,72,76,74,72,69,67,69] }, // 夕焼け：ゆったり郷愁
+    { tempo:360, wave:"triangle", bassWave:"triangle", notes:[72,74,76,79,77,76,74,72] }, // 公園：軽快ほのぼの
+    { tempo:450, wave:"sine",     bassWave:"sine",     notes:[72,74,76,79,81,79,76,74] }, // 縁側：のんびり和風(ヨナ抜き)
+    { tempo:290, wave:"triangle", bassWave:"sawtooth", notes:[76,79,76,74,72,74,76,79] }  // 祭り：祭囃子風
+  ];
+  // 合成BGM開始（mp3が無いシーン用フォールバック）。ctx 必須。
+  function startSynth(idx){
+    if(!ctx||bgmTimer) return;
     bgmStep=0;
+    const sc=BGM_SCENES[idx % BGM_SCENES.length];
     bgmTimer=setInterval(()=>{
       if(!ctx) return;
-      const n=melody[bgmStep%melody.length];
-      tone(N(n),0.28,"sine",0.06);
-      if(bgmStep%2===0) tone(N(n-24),0.4,"triangle",0.05);
+      const n=sc.notes[bgmStep%sc.notes.length];
+      tone(N(n),0.28,sc.wave,0.06);
+      if(bgmStep%2===0) tone(N(n-24),0.4,sc.bassWave,0.05);
       bgmStep++;
-    },360);
+    },sc.tempo);
   }
-  function stopBgm(){ if(bgmTimer){ clearInterval(bgmTimer); bgmTimer=null; } }
+  function stopSynth(){ if(bgmTimer){ clearInterval(bgmTimer); bgmTimer=null; } }
+
+  function startBgm(){
+    if(!settings.bgm||settings.muted||!ctx) return;
+    const idx=bgmIndex();
+    const key=BGM_KEYS[idx % BGM_KEYS.length];
+    const file=key && BGM_FILES[key];
+    if(file){
+      // mp3 を fetch → Web Audio でループ再生（打鍵音と同じ ctx→master を通すので確実に共存）
+      stopSynth();
+      bgmWantKey=key;
+      if(bgmBuffers[key]){ playBuffer(key); return; }
+      // 初回はロード&デコード。完了時にまだ同じシーンなら再生（非同期）。
+      // file:// では fetch が失敗するので合成BGMにフォールバック（本番 https / ローカルHTTPサーバでmp3再生）。
+      fetch(file).then(r=>r.arrayBuffer()).then(ab=>{
+        ctx.decodeAudioData(ab,
+          (buf)=>{ bgmBuffers[key]=buf;
+            if(bgmWantKey===key && settings.bgm && !settings.muted) playBuffer(key); },
+          ()=>{ if(bgmWantKey===key) startSynth(idx); });
+      }).catch(()=>{ if(bgmWantKey===key) startSynth(idx); });
+      return;
+    }
+    // フォールバック：合成BGM
+    bgmWantKey=null;
+    stopBgmSource();
+    startSynth(idx);
+  }
+  function stopBgm(){ bgmWantKey=null; stopSynth(); stopBgmSource(); }
   function refreshBgm(){ stopBgm(); startBgm(); }
   return {resume, ensure, setVol, sfx, startBgm, stopBgm, refreshBgm};
 })();
@@ -1197,7 +1265,10 @@ function startCourse(courseId) {
   game.bossActive = false; game.bossCooldown = 14; game._flash = 0;
   game.phase = 'play';
   game.courseBest = courseBest(course.id);
-  game.bgIndex = (typeof SCENE_BGS !== 'undefined' && SCENE_BGS.length) ? Math.floor(Math.random() * SCENE_BGS.length) : 0;
+  // 通常はランダム。URLハッシュ #bg=4 等で背景を固定できる（BGM等の動作確認用・通常プレイは無影響）。
+  const _bgForce = (typeof location !== 'undefined') && /[#&]bg=(\d+)/.exec(location.hash || '');
+  game.bgIndex = _bgForce ? (+_bgForce[1] % (SCENE_BGS.length || 1))
+    : ((typeof SCENE_BGS !== 'undefined' && SCENE_BGS.length) ? Math.floor(Math.random() * SCENE_BGS.length) : 0);
   hideOverlay();
   Audio2.resume(); Audio2.refreshBgm();
   say('はじめるよ！');
@@ -1221,7 +1292,7 @@ function spawnOne() {
   const c = makeCat(type, word);
   c.x = spawnGapX();
   c.y = beltLaneY();
-  c.vx = (90 + 30 * (game.course.beltSpeed)) * game.course.beltSpeed * speedMul(settings.speed); // 速度帯×設定倍率
+  c.vx = (90 + 30 * (game.course.beltSpeed)) * game.course.beltSpeed * speedMul(settings.speed) * NK_SPEED_SCALE; // 速度帯×設定倍率×全体係数
   if (c.tier === 'rare') { say('レアだ！'); setMood('happy', 0.6); }
   game.cats.push(c);
 }
@@ -1234,7 +1305,7 @@ function spawnBoss() {
   }
   const b = makeBoss(bossType(), words);
   b.x = spawnGapX(); b.y = beltLaneY();
-  b.vx = (90 + 30 * game.course.beltSpeed) * game.course.beltSpeed * 0.72 * speedMul(settings.speed); // ボスはやや遅い×設定倍率（渋滞緩和で 0.6→0.72）
+  b.vx = (90 + 30 * game.course.beltSpeed) * game.course.beltSpeed * 0.72 * speedMul(settings.speed) * NK_SPEED_SCALE; // ボスはやや遅い×設定倍率×全体係数（渋滞緩和で 0.6→0.72）
   game.cats.push(b);
   game.bossActive = true;
   say('ボスがきた！'); setMood('happy', 0.8); Audio2.sfx.boss();

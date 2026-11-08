@@ -118,6 +118,15 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--sky);
 .zdtext h1{margin:0 0 8px;}
 .zinfo{font-size:17px;line-height:1.7;font-weight:700;max-width:30em;margin:0 0 10px;}
 .zmeta{font-size:14px;font-weight:700;color:var(--sub) !important;margin:0;}
+/* ことばの ながさ（コースを選ぶ画面） */
+.len-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin:4px 0 10px;}
+.len-label{font-weight:800;color:var(--ink);margin-right:4px;}
+.len-btn{border:2px solid #d6e4ef;background:#fff;color:var(--ink);border-radius:14px;padding:8px 14px;font:inherit;
+  font-weight:900;font-size:16px;cursor:pointer;display:inline-flex;flex-direction:column;align-items:center;line-height:1.25;}
+.len-btn small{font-size:11px;font-weight:700;color:var(--sub);}
+.len-btn.on{background:#ffd23f;border-color:#e6b800;color:#5a4a00;}
+.len-btn.on small{color:#5a4a00;}
+.res-course{margin:2px 0 0;font-size:13px;font-weight:700;color:var(--sub) !important;}
 /* 結果 */
 .res{display:flex;gap:26px;align-items:flex-start;text-align:left;}
 .res-main{flex:0 0 auto;}
@@ -388,6 +397,43 @@ function bandForLength(n) {
   return 'xlong';
 }
 
+// ---- ことばの ながさ（コースを選ぶ画面で選ぶ・こっちゃんのリクエスト 2026-11-09） ----
+// 文字数は表示どおりに数える（「ー」や小さい「ゃ」も1もじ）。
+const LEN_OPTS = [
+  { id: 'max4', name: 'みじかい', note: '4もじまで', max: 4 },
+  { id: 'max6', name: 'ふつう', note: '6もじまで', max: 6 },
+  { id: 'all', name: 'ながい', note: 'ぜんぶ', max: Infinity }
+];
+function allLengths() { return LEN_OPTS; }
+function wordMaxLen(id) { const o = LEN_OPTS.find(x => x.id === id); return o ? o.max : Infinity; }
+const BAND_ORDER = ['short', 'mid', 'long', 'xlong'];
+function charLen(w) { return Array.from(w).length; }
+
+// その帯の上限以内の語。8語に満たなければ1つ短い帯の上限以内の語を足していく
+// （長い言葉の猫＝品種・レアにも、上限以内でいちばん長めの言葉を回す。猫の種類と点数は変えない）
+function cappedPool(band, max) {
+  let i = BAND_ORDER.indexOf(band);
+  if (i < 0) i = 0;
+  const pool = [];
+  for (; i >= 0 && pool.length < 8; i--) {
+    for (const w of wordPool(BAND_ORDER[i])) if (charLen(w) <= max) pool.push(w);
+  }
+  return pool;
+}
+
+function pickWordCapped(band, max, rng, recent) {
+  if (!(max < Infinity)) return pickWord(band, rng, recent);
+  rng = rng || Math.random;
+  const pool = cappedPool(band, max);
+  if (!pool.length) return pickWord(band, rng, recent);
+  let cand = pool;
+  if (recent && recent.length) {
+    const filtered = pool.filter(w => recent.indexOf(w) === -1);
+    if (filtered.length) cand = filtered;
+  }
+  return cand[Math.floor(rng() * cand.length)];
+}
+
 /* ===== cats.js ===== */
 // 猫打 v2 のロスター：本物の猫45種（日本の猫10・品種28・めずらしい品種7）＋隠しのオスカー本人＋ボスのおやぶん。
 // tier→band（言葉の長さ）: common=mid / kitten=short / breed=long / rare=xlong。weight: common10 / kitten6 / breed3 / rare1。
@@ -559,6 +605,9 @@ function rosterTally(cats) {
   }
   return order;
 }
+
+// 記録のキー：ことばの ながさごとに分ける。「ながい（ぜんぶ）」はいままでのキー（コースid）のまま。
+function scoreKey(courseId, lenId) { return (!lenId || lenId === 'all') ? courseId : courseId + ':' + lenId; }
 
 /* ===== zukan.js ===== */
 // ねこずかん：会えた（捕まえた）猫の回数を { id: 回数 } で保存する。
@@ -1509,7 +1558,7 @@ function drawPlaza(list, t) {
 
 /* ===== ui.js ===== */
 const SETTINGS_KEY = 'nekoda-settings-v1';
-let settings = { vol: 0.8, bgm: true, muted: false, romaStyle: 'hepburn', romaHint: true, fingerGuide: true, speed: 'normal' };
+let settings = { vol: 0.8, bgm: true, muted: false, romaStyle: 'hepburn', romaHint: true, fingerGuide: true, speed: 'normal', wordLen: 'all' };
 function loadSettings() {
   try { const s = JSON.parse(localStorage.getItem(SETTINGS_KEY)); if (s) Object.assign(settings, s); } catch (e) {}
 }
@@ -1518,7 +1567,8 @@ function persistSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.strin
 const SCORES_KEY = 'nekoda-scores-v1';
 function loadScores() { try { return JSON.parse(localStorage.getItem(SCORES_KEY)) || {}; } catch (e) { return {}; } }
 function saveScores(s) { try { localStorage.setItem(SCORES_KEY, JSON.stringify(s)); } catch (e) {} }
-function courseBest(courseId) { const l = loadScores()[courseId] || []; return l.length ? Math.max.apply(null, l) : 0; }
+// ベストは「コース×ことばの ながさ」ごと（ながい＝いままでの記録）
+function courseBest(courseId, lenId) { const l = loadScores()[scoreKey(courseId, lenId || settings.wordLen)] || []; return l.length ? Math.max.apply(null, l) : 0; }
 
 function overlay() { return document.getElementById('overlay'); }
 function panel() { return document.getElementById('panel'); }
@@ -1573,12 +1623,20 @@ function showTitle() {
 }
 
 function showCourses() {
+  const lens = allLengths().map(o =>
+    '<button class="len-btn' + (settings.wordLen === o.id ? ' on' : '') + '" data-len="' + o.id + '">' + o.name +
+    '<small>' + o.note + '</small></button>').join('');
   const btns = allCourses().map(c =>
     '<button class="course-btn" data-course="' + c.id + '">' + c.name +
     '<span class="sub">' + c.time + 'びょう ／ ベスト: ' + courseBest(c.id) + '</span></button>'
   ).join('');
-  showOverlay('<h1>コースをえらぶ</h1>' + btns +
+  showOverlay('<h1>コースをえらぶ</h1>' +
+    '<div class="len-row"><span class="len-label">ことばの ながさ</span>' + lens + '</div>' +
+    '<div>' + btns + '</div>' +
     '<div><button class="big-btn btn-gray" id="back-title">もどる</button></div>');
+  panel().querySelectorAll('[data-len]').forEach(b => {
+    b.onclick = () => { settings.wordLen = b.dataset.len; persistSettings(); showCourses(); };
+  });
   panel().querySelectorAll('[data-course]').forEach(b => {
     b.onclick = () => startCourse(b.dataset.course);
   });
@@ -1651,7 +1709,8 @@ function showResult(d) {
   const weak = '<section class="res-sec"><h2>まちがえやすかった キー</h2><div class="res-weak">' +
     (weakList || '<span class="wk ok">ミスなし！ すごい！</span>') + '</div></section>';
   showOverlay(
-    '<div class="res"><div class="res-main"><h1>スコア ' + d.score + '！</h1>' + record + stats + '</div>' +
+    '<div class="res"><div class="res-main"><h1>スコア ' + d.score + '！</h1>' +
+    '<p class="res-course">' + esc(d.courseName || '') + ' ／ ことば：' + esc(d.lenName || '') + '</p>' + record + stats + '</div>' +
     '<div class="res-side">' + newCats + weak + '</div></div>' +
     '<div class="res-btns"><button class="big-btn" id="again" data-primary>もういちど</button>' +
     '<button class="big-btn btn-blue" id="to-title2">コースせんたく</button></div>', 'result');
@@ -1764,7 +1823,7 @@ function planCat() {
   if (bossOK) {
     const words = [];
     for (let i = 0; i < 3; i++) {
-      const w = pickWord('long', Math.random, game.recentWords.concat(words));
+      const w = pickWordCapped('long', wordMaxLen(game.wordLen), Math.random, game.recentWords.concat(words));
       words.push(w); rememberWord(w);
     }
     const budget = words.reduce((s, w) => s + wordBudget(keysOf(w), course, mul), 0);
@@ -1772,7 +1831,7 @@ function planCat() {
     return { boss: true, type: bossType(), words: words, budget: budget, v: catSpeed(D, cross, budget) };
   }
   const type = pickCatType(course);
-  const word = pickWord(type.band, Math.random, game.recentWords);
+  const word = pickWordCapped(type.band, wordMaxLen(game.wordLen), Math.random, game.recentWords); // ことばの ながさの上限以内
   rememberWord(word);
   const budget = wordBudget(keysOf(word), course, mul);
   return { boss: false, type: type, word: word, budget: budget, v: catSpeed(D, cross, budget) };
@@ -1815,7 +1874,8 @@ function startCourse(courseId) {
   game.panelShake = 0; game.bonusFlash = 0; game.graceUntil = 0; game.spurtSaid = false; game._flash = 0;
   game.activeSeq = -1; game.lastSpawned = null;
   game.debugBoss = (typeof location !== 'undefined') && /[#&]boss/.test(location.hash || '');
-  game.courseBest = courseBest(course.id);
+  game.wordLen = settings.wordLen || 'all'; // このラウンドの「ことばの ながさ」（記録もこれで分ける）
+  game.courseBest = courseBest(course.id, game.wordLen);
   // 通常はランダム。URLハッシュ #bg=4 等で背景を固定できる（BGM等の動作確認用・通常プレイは無影響）。
   const _bgForce = (typeof location !== 'undefined') && /[#&]bg=(\d+)/.exec(location.hash || '');
   game.bgIndex = _bgForce ? (+_bgForce[1] % (SCENE_BGS.length || 1))
@@ -2084,8 +2144,9 @@ function endRound() {
     elapsedSec: game.playTime, caught: game.caught });
   const score = game.collected;
   const scores = loadScores();
-  const rec = recordScore(scores[game.course.id] || [], score);
-  scores[game.course.id] = rec.list; saveScores(scores);
+  const key = scoreKey(game.course.id, game.wordLen);
+  const rec = recordScore(scores[key] || [], score);
+  scores[key] = rec.list; saveScores(scores);
   saveZukan(game.zukan);
   // 集めた猫を種類別に集計（ブザー直前に捕まえて集会場へ歩いている途中の猫も入れる）
   game.resultCats = rosterTally(game.roster.concat(game.cats.filter(c => c.state === 'gathering')));
@@ -2095,7 +2156,8 @@ function endRound() {
   if (rec.isBest) Audio2.sfx.levelup(); else Audio2.sfx.bonus();
   showResult({ score: score, isBest: rec.isBest, best: rec.best, caught: game.caught,
                cpm: tally.cpm, accuracy: tally.accuracy, maxCombo: game.maxCombo,
-               newCats: game.newCats.slice(), weak: weak, courseName: game.course.name }, game.roster);
+               newCats: game.newCats.slice(), weak: weak, courseName: game.course.name,
+               lenName: (allLengths().find(o => o.id === game.wordLen) || {}).name }, game.roster);
   markWeak(weak.map(w => w.key));
   scheduleFrame(resultTick);
 }
